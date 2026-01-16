@@ -5,6 +5,7 @@ import datetime
 import tempfile
 import shutil
 import glob
+import fnmatch
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,18 +16,41 @@ SFTP_USER = os.getenv("SFTP_USER", "username")
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "password")
 REMOTE_DIR = os.getenv("REMOTE_DIR", "/")
 KEEP_NUM_BACKUPS = int(os.getenv("KEEP_NUM_BACKUPS", "3"))
+IGNORE_CONFIG_FILE = os.getenv("IGNORE_CONFIG_FILE", "ignore_list.txt")
 
 
-def sftp_recursive_download(sftp, remote_dir, local_dir):
+def load_ignore_patterns():
+    ignore_patterns = []
+    if os.path.exists(IGNORE_CONFIG_FILE):
+        with open(IGNORE_CONFIG_FILE, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    ignore_patterns.append(line)
+    return ignore_patterns
+
+
+def should_ignore(filename, ignore_patterns):
+    for pattern in ignore_patterns:
+        if fnmatch.fnmatch(filename, pattern):
+            return True
+    return False
+
+
+def sftp_recursive_download(sftp, remote_dir, local_dir, ignore_patterns):
     os.makedirs(local_dir, exist_ok=True)
 
     for entry in sftp.listdir_attr(remote_dir):
+        if should_ignore(entry.filename, ignore_patterns):
+            print(f"Ignoring: {entry.filename}")
+            continue
+
         print("Found", entry)
         remote_path = f"{remote_dir}/{entry.filename}"
         local_path = os.path.join(local_dir, entry.filename)
 
         if entry.st_mode is not None and (entry.st_mode & 0o170000) == 0o040000:
-            sftp_recursive_download(sftp, remote_path, local_path)
+            sftp_recursive_download(sftp, remote_path, local_path, ignore_patterns)
         else:
             sftp.get(remote_path, local_path)
 
@@ -52,6 +76,9 @@ def main():
 
     temp_dir = tempfile.mkdtemp(prefix="sftp_backup_")
 
+    ignore_patterns = load_ignore_patterns()
+    print(f"Loaded {len(ignore_patterns)} ignore patterns")
+
     try:
         transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
         transport.connect(username=SFTP_USER, password=SFTP_PASSWORD)
@@ -61,7 +88,7 @@ def main():
 
         print("Connected to SFTP")
 
-        sftp_recursive_download(sftp, REMOTE_DIR, temp_dir)
+        sftp_recursive_download(sftp, REMOTE_DIR, temp_dir, ignore_patterns)
 
         print("Download complete, creating zip...")
 
